@@ -1,52 +1,51 @@
-"""Exports monitoring data to JSON for external consumption or persistence."""
+"""Serialise endpoint histories to JSON for external consumption."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict
 
-from routewatch.history import EndpointHistory, average_response_time_ms, error_rate, latest
-from routewatch.reporter import summarise
+from routewatch.history import (
+    EndpointHistory,
+    average_response_time_ms,
+    error_rate,
+    latest,
+)
+from routewatch.monitor import CheckResult
 
 
-def _serialise_result(result: Any) -> dict:
-    """Convert a CheckResult to a JSON-serialisable dict."""
+def _serialise_result(result: CheckResult) -> Dict[str, Any]:
+    """Convert a :class:`CheckResult` to a JSON-serialisable dict."""
     return {
-        "endpoint": result.endpoint,
+        "url": result.url,
+        "timestamp": result.timestamp.isoformat(),
         "status_code": result.status_code,
         "response_time_ms": result.response_time_ms,
         "error": result.error,
-        "timestamp": result.timestamp.isoformat() if result.timestamp else None,
     }
 
 
-def export_history(history: EndpointHistory) -> dict:
-    """Export a single endpoint's history to a serialisable dict."""
+def export_history(history: EndpointHistory) -> Dict[str, Any]:
+    """Return a summary dict for a single endpoint history."""
     last = latest(history)
     return {
-        "endpoint": history.endpoint,
-        "capacity": history.capacity,
-        "total_checks": len(history.results),
+        "url": history.url,
+        "sample_count": len(history.results),
         "average_response_time_ms": average_response_time_ms(history),
         "error_rate": error_rate(history),
-        "latest": _serialise_result(last) if last else None,
+        "latest": _serialise_result(last) if last is not None else None,
+        "results": [_serialise_result(r) for r in history.results],
     }
 
 
-def export_all(histories: dict[str, EndpointHistory]) -> dict:
-    """Export all endpoint histories to a JSON-serialisable report dict."""
-    generated_at = datetime.now(timezone.utc).isoformat()
-    endpoints = [
-        export_history(h) for h in histories.values()
-    ]
-    return {
-        "generated_at": generated_at,
-        "endpoint_count": len(endpoints),
-        "endpoints": endpoints,
-    }
+def export_all(histories: Dict[str, EndpointHistory]) -> Dict[str, Any]:
+    """Serialise every tracked endpoint into a single mapping."""
+    return {url: export_history(h) for url, h in histories.items()}
 
 
-def dump_json(histories: dict[str, EndpointHistory], indent: int = 2) -> str:
-    """Serialise all histories to a JSON string."""
-    return json.dumps(export_all(histories), indent=indent)
+def dump_json(
+    histories: Dict[str, EndpointHistory],
+    indent: int | None = 2,
+) -> str:
+    """Return a JSON string representing all endpoint histories."""
+    return json.dumps(export_all(histories), indent=indent, default=str)
