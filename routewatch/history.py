@@ -40,6 +40,20 @@ class EndpointHistory:
         failures = sum(1 for r in self.results if not r.is_healthy)
         return failures / len(self.results)
 
+    def consecutive_failures(self) -> int:
+        """Return the number of consecutive failures at the tail of results.
+
+        Useful for alerting logic that should only trigger after N failures
+        in a row rather than on isolated errors.
+        """
+        count = 0
+        for result in reversed(self.results):
+            if not result.is_healthy:
+                count += 1
+            else:
+                break
+        return count
+
 
 class HistoryStore:
     """Container for per-endpoint history buffers."""
@@ -71,6 +85,7 @@ class HistoryStore:
                     "avg_response_time_ms": hist.average_response_time_ms(),
                     "error_rate": hist.error_rate(),
                     "last_status": hist.latest.status_code if hist.latest else None,
+                    "consecutive_failures": hist.consecutive_failures(),
                 }
             )
         return rows
