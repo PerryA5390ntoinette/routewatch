@@ -1,100 +1,149 @@
 """Tests for routewatch/commands/run_checks.py."""
 
-from __future__ import annotations
-
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
-from routewatch.commands.run_checks import run_checks
-from routewatch.config import AlertConfig, AppConfig, EndpointConfig
-from routewatch.history import EndpointHistory
+from routewatch.config import AppConfig, EndpointConfig, AlertConfig
 from routewatch.monitor import CheckResult
+from routewatch.history import EndpointHistory
 from routewatch.notifier import NotifierState
-from routewatch.state_store import build_stores
+from routewatch.commands.run_checks import run_checks
 
 
-@pytest.fixture()
+@pytest.fixture
 def app_config():
-    ep = EndpointConfig(url="https://example.com", timeout_s=5.0, slow_threshold_ms=300)
     return AppConfig(
-        endpoints=[ep],
-        alert=AlertConfig(webhook_url="https://hook.example", cooldown_s=60),
-        interval_s=10,
-        history_size=50,
+        endpoints=[
+            EndpointConfig(
+                name="api",
+                url="https://api.example.com/health",
+                interval_seconds=30,
+                timeout_seconds=5,
+                response_time_warn_ms=500,
+                response_time_crit_ms=1000,
+            ),
+            EndpointConfig(
+                name="web",
+                url="https://web.example.com/",
+                interval_seconds=60,
+                timeout_seconds=10,
+                response_time_warn_ms=800,
+                response_time_crit_ms=2000,
+            ),
+        ],
+        alert=AlertConfig(
+            webhook_url="https://hooks.example.com/alert",
+            cooldown_seconds=300,
+        ),
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def stores(app_config):
-    return build_stores(app_config)
+    return {
+        ep.url: {
+            "history": EndpointHistory(max_size=100),
+            "state": NotifierState(),
+        }
+        for ep in app_config.endpoints
+    }
 
 
-@pytest.fixture()
+@pytest.fixture
 def good_result():
     return CheckResult(
-        url="https://example.com",
+        url="https://api.example.com/health",
         status_code=200,
         response_time_ms=120.0,
         error=None,
     )
 
 
-def test_run_checks_records_result(app_config, stores, good_result):
-    histories, states = stores
-    with patch(
-        "routewatch.commands.run_checks.check_endpoint",
-        new=AsyncMock(return_value=good_result),
-    ), patch(
-        "routewatch.commands.run_checks.evaluate_and_notify",
-        new=AsyncMock(),
-    ):
-        run_checks(app_config, histories, states)
+@pytest.fixture
+def error_result():
+    return CheckResult(
+        url="https://web.example.com/",
+        status_code=None,
+        response_time_ms=None,
+        error="Connection refused",
+    )
+
+
+def test_run_checks_records_result(app_config, stores, good_result, error_result):
+    """run_checks should record each check result into the appropriate history."""
+    results = {
+        "https://api.example.com/health": good_result,
+        "https://web.example.com/": error_result,
+    }
+
+    async def fake_check(endpoint, timeout):
+        return results[endpoint.url]
+
+    with patch("routewatch.commands.run_checks.check_endpoint", side_effect=fake_check), \
+         patch("routewatch.commands.run_checks.evaluate_and_notify"):
+        import asyncio
+        asyncio.run(run_checks(app_config, stores))
+
+    api_history = stores["https://api.example.com/health"]["history"]
+    web_history = stores["https://web.example.com/"]["history"]
 
     from routewatch.history import latest
-
-    assert latest(histories["https://example.com"]) == good_result
-
-
-def test_run_checks_calls_evaluate_and_notify(app_config, stores, good_result):
-    histories, states = stores
-    mock_notify = AsyncMock()
-    with patch(
-        "routewatch.commands.run_checks.check_endpoint",
-        new=AsyncMock(return_value=good_result),
-    ), patch(
-        "routewatch.commands.run_checks.evaluate_and_notify",
-        new=mock_notify,
-    ):
-        run_checks(app_config, histories, states)
-
-    mock_notify.assert_awaited_once()
+    assert latest(api_history) == good_result
+    assert latest(web_history) == error_result
 
 
-def test_run_checks_all_endpoints_checked():
-    eps = [
-        EndpointConfig(url=f"https://ep{i}.example", timeout_s=5.0, slow_threshold_ms=300)
-        for i in range(3)
-    ]
-    cfg = AppConfig(
-        endpoints=eps,
-        alert=AlertConfig(webhook_url="https://hook.example", cooldown_s=60),
-        interval_s=10,
-        history_size=50,
-    )
-    histories, states = build_stores(cfg)
+def test_run_checks_calls_evaluate_and_notify(app_config, stores, good_result, error_result):
+    """run_checks should call evaluate_and_notify for each endpoint after recording."""
+    results = {
+        "https://api.example.com/health": good_result,
+        "https://web.example.com/": error_result,
+    }
 
-    checked_urls = []
+    async def fake_check(endpoint, timeout):
+        return results[endpoint.url]
 
-    async def fake_check(ep):
-        checked_urls.append(ep.url)
-        return CheckResult(url=ep.url, status_code=200, response_time_ms=50.0, error=None)
+    with patch("routewatch.commands.run_checks.check_endpoint", side_effect=fake_check) as mock_check, \
+         patch("routewatch.commands.run_checks.evaluate_and_notify") as mock_notify:
+        import asyncio
+        asyncio.run(run_checks(app_config, stores))
 
-    with patch(
-        "routewatch.commands.run_checks.check_endpoint", new=fake_check
-    ), patch(
-        "routewatch.commands.run_checks.evaluate_and_notify", new=AsyncMock()
-    ):
-        run_checks(cfg, histories, states)
+    assert mock_notify.call_count == 2
 
-    assert sorted(checked_urls) == sorted(ep.url for ep in eps)
+
+def test_run_checks_passes_correct_state_to_notify(app_config, stores, good_result):
+    """evaluate_and_notify should receive the correct state object for each endpoint."""
+    results = {
+        ep.url: CheckResult(
+            url=ep.url,
+            status_code=200,
+            response_time_ms=100.0,
+            error=None,
+        )
+        for ep in app_config.endpoints
+    }
+
+    async def fake_check(endpoint, timeout):
+        return results[endpoint.url]
+
+    notify_calls = []
+
+    def capture_notify(endpoint_cfg, alert_cfg, result, history, state):
+        notify_calls.append({
+            "url": endpoint_cfg.url,
+            "state": state,
+            "history": history,
+        })
+
+    with patch("routewatch.commands.run_checks.check_endpoint", side_effect=fake_check), \
+         patch("routewatch.commands.run_checks.evaluate_and_notify", side_effect=capture_notify):
+        import asyncio
+        asyncio.run(run_checks(app_config, stores))
+
+    urls_notified = {c["url"] for c in notify_calls}
+    assert urls_notified == {"https://api.example.com/health", "https://web.example.com/"}
+
+    for c in notify_calls:
+        expected_state = stores[c["url"]]["state"]
+        expected_history = stores[c["url"]]["history"]
+        assert c["state"] is expected_state
+        assert c["history"] is expected_history
