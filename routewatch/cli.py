@@ -1,21 +1,11 @@
-"""Minimal CLI entry-point for RouteWatch.
-
-Usage:
-    python -m routewatch.cli          # run with env-based config
-    python -m routewatch.cli --report  # print a one-shot status report and exit
-"""
-
+"""Entry-point: parse CLI arguments and dispatch to command handlers."""
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sys
-from typing import Dict
 
 from routewatch.config import load_config_from_env, validate_config
-from routewatch.history import EndpointHistory
-from routewatch.monitor import check_endpoint
-from routewatch.reporter import build_report, format_report_text
+from routewatch.state_store import build_stores
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -23,47 +13,70 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         prog="routewatch",
         description="Lightweight HTTP endpoint monitor.",
     )
-    parser.add_argument(
-        "--report",
-        action="store_true",
-        help="Perform a single check of all endpoints, print a report, then exit.",
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    sub.add_parser("run", help="Run one round of checks and send alerts if needed.")
+    sub.add_parser("dashboard", help="Display a live auto-refreshing dashboard.")
+    sub.add_parser("report", help="Print a summary report for all endpoints.")
+
+    history_p = sub.add_parser("history", help="Show recent check history for all endpoints.")
+    history_p.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Maximum number of results to show per endpoint (default: 10).",
     )
+
+    export_p = sub.add_parser("export", help="Export history snapshot as JSON.")
+    export_p.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
+    prune_p = sub.add_parser("prune", help="Remove expired history entries.")
+    prune_p.add_argument(
+        "--max-age-hours",
+        type=float,
+        default=24.0,
+        metavar="H",
+        help="Remove results older than H hours (default: 24).",
+    )
+
     return parser
 
 
-async def _one_shot_report() -> None:
-    """Check every configured endpoint once and print a summary report."""
-    config = load_config_from_env()
-    errors = validate_config(config)
-    if errors:
-        for err in errors:
-            print(f"Config error: {err}", file=sys.stderr)
-        sys.exit(1)
-
-    histories: Dict[str, EndpointHistory] = {}
-
-    for ep in config.endpoints:
-        result = await check_endpoint(ep)
-        h: EndpointHistory = []
-        from routewatch.history import record
-        record(h, result)
-        histories[ep.url] = h
-
-    summaries = build_report(histories)
-    print(format_report_text(summaries))
-
-
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:  # pragma: no cover
     parser = _build_arg_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    if args.report:
-        asyncio.run(_one_shot_report())
-    else:
-        # Defer import to avoid circular deps at module level
-        from routewatch.scheduler import run  # type: ignore[import]
-        asyncio.run(run())
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
 
+    cfg = load_config_from_env()
+    validate_config(cfg)
+    stores = build_stores(cfg)
+    histories = {url: s.history for url, s in stores.items()}
+    states = {url: s.state for url, s in stores.items()}
 
-if __name__ == "__main__":
-    main()
+    if args.command == "run":
+        from routewatch.commands.run_checks import run_checks
+        run_checks(cfg, stores)
+
+    elif args.command == "dashboard":
+        from routewatch.commands.show_dashboard import run_dashboard
+        run_dashboard(cfg, histories)
+
+    elif args.command == "report":
+        from routewatch.commands.show_report import run_report
+        run_report(cfg, histories)
+
+    elif args.command == "history":
+        from routewatch.commands.show_history import run_history
+        run_history(cfg, histories, limit=args.limit)
+
+    elif args.command == "export":
+        from routewatch.commands.export_snapshot import run_export
+        run_export(cfg, histories, pretty=args.pretty)
+
+    elif args.command == "prune":
+        from routewatch.commands.prune_history import run_prune
+        run_prune(cfg, histories, max_age_hours=args.max_age_hours)
