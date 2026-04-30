@@ -56,6 +56,12 @@ def test_build_payload_null_response_time(alert_config):
     assert payload["alert"]["error"] == "Connection refused"
 
 
+def test_build_payload_includes_timestamp(failed_result, alert_config):
+    """Ensure the payload preserves the check result timestamp."""
+    payload = build_payload(failed_result, alert_config)
+    assert payload["alert"]["timestamp"] == failed_result.timestamp
+
+
 @respx.mock
 def test_send_alert_success(failed_result, alert_config):
     respx.post(WEBHOOK_URL).mock(return_value=httpx.Response(200))
@@ -86,3 +92,12 @@ def test_send_alert_returns_false_after_all_retries(failed_result, alert_config)
     respx.post(WEBHOOK_URL).mock(return_value=httpx.Response(500))
     result = send_alert(failed_result, alert_config)
     assert result is False
+
+
+@respx.mock
+def test_send_alert_retry_count_matches_config(failed_result, alert_config):
+    """Verify that the number of attempts matches retry_attempts from config."""
+    route = respx.post(WEBHOOK_URL).mock(return_value=httpx.Response(500))
+    send_alert(failed_result, alert_config)
+    # alert_config has retry_attempts=2, so we expect 1 initial + 2 retries = 3 total
+    assert route.call_count == alert_config.retry_attempts + 1
