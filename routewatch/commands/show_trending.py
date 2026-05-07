@@ -1,67 +1,71 @@
-"""CLI command: display response-time trend for all monitored endpoints."""
+"""CLI command: display response-time trend for every monitored endpoint."""
 
 from __future__ import annotations
 
-import sys
-from io import StringIO
-from typing import IO
+import io
+from typing import Dict
 
 from routewatch.config import AppConfig
 from routewatch.history import EndpointHistory
 from routewatch.trending import TrendStats, compute_all
 
-_DIRECTION_SYMBOL = {
-    "improving": "\u2193",   # ↓
-    "stable":    "\u2192",   # →
-    "degrading": "\u2191",   # ↑
-}
-
 _COL_URL = 36
 _COL_SAMPLES = 9
 _COL_SLOPE = 14
-_COL_TREND = 12
+_COL_DIRECTION = 12
+_COL_VERDICT = 18
 
 
 def _format_header() -> str:
     return (
         f"{'Endpoint':<{_COL_URL}}"
         f"{'Samples':>{_COL_SAMPLES}}"
-        f"{'Slope(ms)':>{_COL_SLOPE}}"
-        f"  {'Trend':<{_COL_TREND}}"
+        f"{'Slope(ms/s)':>{_COL_SLOPE}}"
+        f"{'Direction':>{_COL_DIRECTION}}"
+        f"{'Verdict':>{_COL_VERDICT}}"
     )
 
 
-def _format_row(stat: TrendStats) -> str:
-    slope_str = (
-        f"{stat.slope_ms_per_check:+.2f}"
-        if stat.slope_ms_per_check is not None
-        else "n/a"
-    )
-    symbol = _DIRECTION_SYMBOL.get(stat.direction, "?")
-    trend_label = f"{symbol} {stat.direction}"
+def _format_row(url: str, stats: TrendStats) -> str:
+    if stats.sample_count == 0:
+        return f"{url:<{_COL_URL}}{'0':>{_COL_SAMPLES}}{'n/a':>{_COL_SLOPE}}{'n/a':>{_COL_DIRECTION}}{'insufficient data':>{_COL_VERDICT}}"
+
+    slope_str = f"{stats.slope_ms_per_s:+.3f}" if stats.slope_ms_per_s is not None else "n/a"
+
+    if stats.slope_ms_per_s is None:
+        direction = "n/a"
+        verdict = "insufficient data"
+    elif stats.slope_ms_per_s > 0.5:
+        direction = "↑ rising"
+        verdict = "degrading"
+    elif stats.slope_ms_per_s < -0.5:
+        direction = "↓ falling"
+        verdict = "improving"
+    else:
+        direction = "→ flat"
+        verdict = "stable"
+
     return (
-        f"{stat.endpoint_url:<{_COL_URL}}"
-        f"{stat.sample_count:>{_COL_SAMPLES}}"
+        f"{url:<{_COL_URL}}"
+        f"{stats.sample_count:>{_COL_SAMPLES}}"
         f"{slope_str:>{_COL_SLOPE}}"
-        f"  {trend_label:<{_COL_TREND}}"
+        f"{direction:>{_COL_DIRECTION}}"
+        f"{verdict:>{_COL_VERDICT}}"
     )
 
 
 def run_trending(
-    config: AppConfig,
-    histories: dict[str, EndpointHistory],
-    out: IO[str] = sys.stdout,
+    cfg: AppConfig,
+    histories: Dict[str, EndpointHistory],
+    out: io.TextIOBase,
 ) -> None:
     """Write a trending table to *out*."""
-    stats = compute_all(histories)
+    all_stats = compute_all(histories)
 
-    buf = StringIO()
-    buf.write(_format_header() + "\n")
-    buf.write("-" * (_COL_URL + _COL_SAMPLES + _COL_SLOPE + 2 + _COL_TREND) + "\n")
-    for url in config.endpoints_by_url():
-        stat = stats.get(url)
-        if stat is None:
-            continue
-        buf.write(_format_row(stat) + "\n")
+    separator = "-" * (_COL_URL + _COL_SAMPLES + _COL_SLOPE + _COL_DIRECTION + _COL_VERDICT)
+    out.write(_format_header() + "\n")
+    out.write(separator + "\n")
 
-    out.write(buf.getvalue())
+    for ep in cfg.endpoints:
+        stats = all_stats.get(ep.url, TrendStats(sample_count=0, slope_ms_per_s=None))
+        out.write(_format_row(ep.url, stats) + "\n")
