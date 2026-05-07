@@ -64,3 +64,12 @@ def test_run_dashboard_empty_histories(app_config, capsys):
     run_dashboard(app_config, {}, once=True)
     captured = capsys.readouterr()
     assert "RouteWatch Dashboard" in captured.out
+
+
+def test_run_dashboard_shows_response_time(app_config, capsys):
+    """Dashboard output should include the recorded response time for an endpoint."""
+    h = EndpointHistory(url="http://api.example.com", maxlen=10)
+    record(h, _make_result("http://api.example.com", response_time_ms=123.0))
+    run_dashboard(app_config, {"api": h}, once=True)
+    captured = capsys.readouterr()
+    assert "123" in captured.out
