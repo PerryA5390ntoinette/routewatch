@@ -52,3 +52,12 @@ def compute_all(
 ) -> list[SLAResult]:
     """Return SLA results for every endpoint in *endpoints*."""
     return [compute_sla(ep, histories[ep.url]) for ep in endpoints if ep.url in histories]
+
+
+def failing_slas(results: list[SLAResult]) -> list[SLAResult]:
+    """Return only the SLAResult entries that are actively breaching their target.
+
+    Results with no history (``met is None``) are excluded because there is
+    insufficient data to declare an SLA breach.
+    """
+    return [r for r in results if r.met is False]
